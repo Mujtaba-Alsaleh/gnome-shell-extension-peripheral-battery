@@ -65,18 +65,43 @@ preserved across OS updates. Nothing is layered with rpm-ostree.
 
 ## Install
 
-Run the installer. It first runs read-only compatibility checks (GNOME 50,
-python3, Legion Go interface present and the battery report actually
-streaming) and **only installs anything if every check passes**:
+1. Open a terminal.
+2. Download the repository:
+
+   ```sh
+   git clone https://github.com/Mujtaba-Alsaleh/gnome-shell-extension-peripheral-battery.git
+   cd gnome-shell-extension-peripheral-battery
+   ```
+
+3. Make the installer executable:
+
+   ```sh
+   chmod +x install.sh
+   ```
+
+4. Run it:
+
+   ```sh
+   ./install.sh
+   ```
+
+5. **Log out and back in.** The "Peripherals" toggle now lists your devices —
+   including "Legion Go Left" and "Legion Go Right" while the controllers
+   are docked.
+
+### One-liner
 
 ```sh
-./install.sh           # check, then install (creates the udev rule too)
-./install.sh --check   # only run the compatibility test, change nothing
+git clone https://github.com/Mujtaba-Alsaleh/gnome-shell-extension-peripheral-battery.git && cd gnome-shell-extension-peripheral-battery && chmod +x install.sh && ./install.sh
 ```
 
-The script detects your username automatically and uses it for both the
-extension UUID (`peripheral-battery-status@<your user>`) and the udev rule
-owner, then logs you in to the result after a session restart.
+The installer first runs **read-only compatibility checks** (GNOME 50,
+python3, the Legion Go interface present and its battery report actually
+streaming) and only installs anything if every check passes. It detects your
+username automatically for both the extension UUID
+(`peripheral-battery-status@<your user>`) and the udev rule owner. It may ask
+for your **sudo password once when creating the udev rule** — that is
+expected. `./install.sh --check` runs only the tests and changes nothing.
 
 > The installer is the one supported path. For a manual install you would
 > have to do everything it does yourself — including **replacing the
