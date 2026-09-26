@@ -169,6 +169,7 @@ export default class PeripheralBatteryExtension extends Extension {
             this._legionHelper?.force_exit();
         } catch (e) { /* already dead */ }
         this._legionHelper = null;
+        this._legionRespawnAfter = 0;
         try {
             this._legionMonitor?.cancel();
         } catch (e) { /* already dead */ }
@@ -260,6 +261,11 @@ export default class PeripheralBatteryExtension extends Extension {
     /* ---------------- Data collection ---------------- */
 
     _refresh() {
+        // Self-heal: make sure the Legion helper is alive before we read
+        // its state file. Cheap (single get_if_exited call) and idempotent
+        // thanks to the flock + respawn back-off.
+        this._ensureLegionHelper();
+
         const devices = new Map();
 
         try {
@@ -412,26 +418,27 @@ export default class PeripheralBatteryExtension extends Extension {
     }
 
     _ensureLegionHelper() {
-        if (this._legionHelper)
-            return;
-        // A very recent state file means an instance is already running
-        // (e.g. the shell restarted while the helper survived). If so,
-        // don't spawn a second one.
-        const file = Gio.File.new_for_path(LEGION_STATE_FILE);
-        try {
-            const info = file.query_info('time::modified',
-                Gio.FileQueryInfoFlags.NONE, null);
-            const mtime = info.get_modification_time().to_unix();
-            if ((Date.now() / 1000) - mtime < 90)
-                return;
-        } catch (e) { /* file absent -> spawn */ }
+        const now = Date.now();
+        if (this._legionHelper) {
+            if (!this._legionHelper.get_if_exited())
+                return;                     // a live instance is running
+            this._legionHelper = null;      // it exited: allow a respawn
+        }
+        if (now < (this._legionRespawnAfter ?? 0))
+            return;                         // brief back-off after a spawn
         try {
             this._legionHelper = new Gio.Subprocess({
                 argv: ['python3', this._getLegionHelperPath()],
                 flags: Gio.SubprocessFlags.STDIN_PIPE,
             });
+            // The helper single-instances itself via flock, so a fresh
+            // spawn is harmless even if a previous instance survived a
+            // shell restart; if this one loses the flock race it exits on
+            // its own and is respawned by the next refresh.
+            this._legionRespawnAfter = now + 15000;
         } catch (e) {
             console.warn(`[${this.metadata.uuid}] Legion helper: ${e.message}`);
+            this._legionHelper = null;
         }
     }
 

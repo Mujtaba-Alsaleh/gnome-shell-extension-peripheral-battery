@@ -30,7 +30,7 @@ detachable left/right controllers.
 |-------------------|------------------------------------------------------------|
 | BlueZ (`org.bluez`)  | Bluetooth devices exposing `Battery1.Percentage`, `Device1.BatteryLevel` or `Device1.BatteryPercentage` (bluez ≥ 5.56/5.64) |
 | UPower (`org.freedesktop.UPower`) | USB/HID++/dongle devices, e.g. Logitech mice & keyboards (`UPower.Device`) |
-| Legion Go controllers | Docked detachable controllers (`17ef:61eb`), read via hidraw — see below |
+| Legion Go controllers | Docked detachable controllers (`17ef:61eb`/`61ed`), read via hidraw — see below |
 
 Devices are de-duplicated by name; BlueZ wins for Bluetooth devices.
 The laptop's own battery and line power are excluded.
@@ -38,16 +38,22 @@ The laptop's own battery and line power are excluded.
 ### Legion Go controllers
 
 The Legion Go's detachable controllers have their own batteries. While docked
-they enumerate as a single USB device (`17ef:61eb` "Legion Controller"); the
-raw HID interface streams a status report (id `0x04`) containing both
-controllers' battery level and attachment state, and the stock
-`hid-lenovo-go` kernel driver passes it through to hidraw.
+they enumerate as a single USB device (`17ef:61eb`/`61ed` "Legion
+Controller"); the raw HID interface streams a status report (id `0x04`)
+containing both controllers' battery level and attachment state, and the
+stock `hid-lenovo-go` kernel driver passes it through to hidraw.
 
 The extension spawns `tools/legion_go_battery.py` on enable; the helper reads
 the stream and writes `~/.cache/peripheral-battery-status/legion-go.json`,
 which the extension watches (inotify). Everything happens in user space: the
 only system change is a udev rule (see below), and no kernel patching or
 extra packages are needed (`python3` only).
+
+Battery levels are reported **only while a controller is physically docked**.
+A detached controller stays in radio contact with the tablet, so the raw
+stream keeps flowing — but its battery bytes are stale there. That is why a
+controller's row disappears as soon as it leaves the rails and shows the real
+level again when it is snapped back on.
 
 ## Requirements
 
@@ -125,6 +131,15 @@ start).
   state file:
   `journalctl --user -u org.gnome.Shell | grep -i legion`
   and `cat ~/.cache/peripheral-battery-status/legion-go.json`.
+- **Rows stay at 100% while the controllers are detached** — expected
+  behaviour: the controller batteries are only reported while docked, so the
+  rows hide the moment the controllers leave the rails. If you still see the
+  rows after updating the extension, **log out and back in** so the shell
+  re-spawns the helper.
+- **Controllers report 100% immediately after re-docking** after a draining
+  session — capture what the interface actually sends during a
+  detach/re-dock cycle to check whether the level is stale or genuine:
+  `python3 tools/legion_go_capture.py` (see `tools/legion_go_capture.py`).
 - **The installer's stream check fails** — the controllers must be docked and
   hhd/inputplumber must be running; run `./install.sh --check` again after
   they are.
@@ -143,6 +158,7 @@ install.sh      one-shot installer: compatibility check, then install
 Makefile        make install/uninstall convenience (same templating as the script)
 tools/probe.js  standalone probe to dump what BlueZ/UPower report
 tools/legion_go_battery.py  Legion Go controller battery helper (spawned)
+tools/legion_go_capture.py  diagnostic: log raw 0x04/0x74 reports during a detach/re-dock cycle
 ```
 
 ## License

@@ -17,12 +17,22 @@ under report id 0x74):
     byte 12 bit 7   left controller attached   (bit = 0 -> attached)
     byte 13 bit 7   right controller attached  (bit = 0 -> attached)
 
-The state file is only rewritten when the values change. When the stream
-goes quiet or the interface dies (controller undock tears the interface
-down on this unit -- no flag-flip report is emitted, and the final report
-can carry corrupt values), a "detached" state is written that drops the
-last battery levels; the extension then hides those rows until the
-controllers are docked again.
+The state file is only rewritten when the values change. Battery levels
+are published only while a controller is physically docked (is_attached):
+a detached controller stays in radio contact with the tablet, so the raw
+stream keeps flowing, but its battery bytes go stale there. While
+detached the level is therefore withheld (null) and the extension hides
+that row until the controller is snapped back onto the rail.
+
+The helper single-instances itself with an flock on the state directory:
+the extension always spawns it, and a competing instance simply exits.
+
+Two further paths cover the case where the stream itself ends (controller
+off, or undocked out of radio reach): when the interface dies (EIO) or
+the stream goes quiet for SILENCE_TIMEOUT seconds, a "detached" state is
+written that drops the last battery levels. On this unit undocking tears
+the interface down without a flag-flip report, and the final report can
+carry corrupt values.
 
 State file format (JSON):
     {
@@ -36,6 +46,7 @@ The helper exits when its stdin reaches EOF, so the extension can manage
 its lifetime by keeping a pipe open (and closing it to stop the helper).
 """
 
+import fcntl
 import json
 import os
 import select
@@ -52,6 +63,30 @@ DISCOVERY_RETRY = 3.0                # seconds between device re-scans
 STATE_DIR = os.path.join(os.path.expanduser("~/.cache"),
                          "peripheral-battery-status")
 STATE_PATH = os.path.join(STATE_DIR, "legion-go.json")
+LOCK_PATH = os.path.join(STATE_DIR, "legion-go.lock")
+
+
+def _acquire_lock():
+    """Single-instance guard via flock on the state directory.
+
+    The extension always spawns the helper; this lock makes a competing
+    instance exit silently, so a helper that survived a shell restart is
+    never duplicated. The lock dies with the process, so there is nothing
+    to clean up.
+    """
+    global _lock_fd
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        _lock_fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        if _lock_fd is not None:
+            try:
+                os.close(_lock_fd)
+            except OSError:
+                pass
+        return False
 
 
 def discover_raw_hidraw():
@@ -96,18 +131,23 @@ def parse_report(buf):
 
 
 def snapshot(state, last_seen, ok=True):
-    """Fold the raw parse into the public JSON state."""
+    """Fold the raw parse into the public JSON state.
+
+    A controller's battery level is only trustworthy while it is
+    physically docked. When it is detached (or the report is silent), the
+    level is withheld as ``None`` so the extension hides that row.
+    """
     s = state or {}
     return {
         "ok": ok,
         "last_seen": last_seen,
         "left": {
-            "pct": s.get("left"),
+            "pct": s.get("left") if s.get("attL") else None,
             "attached": bool(s.get("attL")),
             "connected": bool(s.get("connL")),
         },
         "right": {
-            "pct": s.get("right"),
+            "pct": s.get("right") if s.get("attR") else None,
             "attached": bool(s.get("attR")),
             "connected": bool(s.get("connR")),
         },
@@ -132,6 +172,7 @@ def write_state(payload):
 
 
 _last_payload = None
+_lock_fd = None
 _stop = False
 
 # Only treat stdin-EOF as "parent wants us to exit" when stdin actually
@@ -156,6 +197,11 @@ def _on_signal(*_a):
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    if not _acquire_lock():
+        # Another instance is already running (e.g. it survived a shell
+        # restart); the extension always spawns us, so just bow out.
+        return 0
 
     state = None      # last parsed report values
     last_seen = 0.0
@@ -240,10 +286,20 @@ def _read_report(fd):
 
 
 def _wait_once(seconds):
-    """Sleep in small slices so signals are handled promptly."""
+    """Sleep in small slices so signals are handled promptly, and exit as
+    soon as the parent (extension) closes our stdin pipe — even when we are
+    stuck in a retry loop (device missing or not readable), so a helper can
+    never outlive its shell and poison the single-instance lock."""
     deadline = time.time() + seconds
     while not _stop and time.time() < deadline:
-        time.sleep(0.1)
+        if WATCH_STDIN:
+            try:
+                r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if sys.stdin in r and os.read(sys.stdin.fileno(), 1) == b"":
+                    raise SystemExit(0)
+            except OSError:
+                pass
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
