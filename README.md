@@ -37,23 +37,30 @@ The laptop's own battery and line power are excluded.
 
 ### Legion Go controllers
 
-The Legion Go's detachable controllers have their own batteries. While docked
-they enumerate as a single USB device (`17ef:61eb`/`61ed` "Legion
-Controller"); the raw HID interface streams a status report (id `0x04`)
-containing both controllers' battery level and attachment state, and the
-stock `hid-lenovo-go` kernel driver passes it through to hidraw.
+The Legion Go's detachable controllers have their own batteries. Docked, they
+enumerate as USB devices (`17ef:61eb`/`61ed` "Legion Controller"); the raw HID
+interface streams a status report (id `0x04`) containing both controllers'
+battery level, and the stock `hid-lenovo-go` kernel driver passes it through
+to hidraw. A **udev rule** (vendor-wide `17ef`) makes the hidraw nodes
+readable by your user.
 
-The extension spawns `tools/legion_go_battery.py` on enable; the helper reads
-the stream and writes `~/.cache/peripheral-battery-status/legion-go.json`,
-which the extension watches (inotify). Everything happens in user space: the
-only system change is a udev rule (see below), and no kernel patching or
-extra packages are needed (`python3` only).
+`tools/legion_go_battery.py` runs as the per-user systemd service
+`peripheral-battery-legion.service` (created and enabled by `install.sh`). It
+reads the stream and writes `~/.cache/peripheral-battery-status/legion-go.json`,
+which the extension watches (inotify). Running the helper as a service — not
+having the shell spawn it on enable — means it survives shell restarts,
+auto-starts at login, and systemd restarts it if it ever dies. Everything else
+stays in user space: the only system change is the udev rule (see below), and
+no kernel patching or extra packages are needed (`python3` only).
 
-Battery levels are reported **only while a controller is physically docked**.
-A detached controller stays in radio contact with the tablet, so the raw
-stream keeps flowing — but its battery bytes are stale there. That is why a
-controller's row disappears as soon as it leaves the rails and shows the real
-level again when it is snapped back on.
+**What to expect with detached controllers:** the report stream keeps sending
+battery bytes while the rail is enumerated, and it marks both controllers
+"attached" even when one is physically detached — docked and detached frames
+are byte-identical. The extension therefore shows whatever the stream reports
+and hides a row only when the stream goes silent (the helper writes
+`"ok": false` after ~15 s without a report). See
+[Troubleshooting](#troubleshooting) for how to tell a live readout from a
+stale one.
 
 ## Requirements
 
@@ -117,7 +124,7 @@ expected. `./install.sh --check` runs only the tests and changes nothing.
 Uninstall:
 
 ```sh
-make uninstall        # removes the extension; the udev rule is left behind
+make uninstall        # removes the extension and the helper service; the udev rule is left behind
 sudo rm /etc/udev/rules.d/99-legion-go-battery.rules   # optional: revert access
 ```
 
@@ -131,11 +138,15 @@ start).
   state file:
   `journalctl --user -u org.gnome.Shell | grep -i legion`
   and `cat ~/.cache/peripheral-battery-status/legion-go.json`.
-- **Rows stay at 100% while the controllers are detached** — expected
-  behaviour: the controller batteries are only reported while docked, so the
-  rows hide the moment the controllers leave the rails. If you still see the
-  rows after updating the extension, **log out and back in** so the shell
-  re-spawns the helper.
+- **Rows stay at 100%/99% while the controllers are detached** — the raw
+  report stream keeps sending battery bytes (with "attached" still set) while
+  the rail is enumerated, so the rows keep their last reported value until the
+  stream goes silent. Whether that detached figure is the controller's live
+  radio battery or a frozen rail value cannot be told from a single sample:
+  let them drain detached and watch
+  `cat ~/.cache/peripheral-battery-status/legion-go.json` (or
+  `python3 tools/legion_go_capture.py`) — a drifting level is live, a pinned
+  one is stale. The row only hides once the stream stops (`"ok": false`).
 - **Controllers report 100% immediately after re-docking** after a draining
   session — capture what the interface actually sends during a
   detach/re-dock cycle to check whether the level is stale or genuine:
@@ -157,7 +168,7 @@ extension.js    the extension (ESM, GNOME 50)
 install.sh      one-shot installer: compatibility check, then install
 Makefile        make install/uninstall convenience (same templating as the script)
 tools/probe.js  standalone probe to dump what BlueZ/UPower report
-tools/legion_go_battery.py  Legion Go controller battery helper (spawned)
+tools/legion_go_battery.py  Legion Go controller battery helper (systemd user service)
 tools/legion_go_capture.py  diagnostic: log raw 0x04/0x74 reports during a detach/re-dock cycle
 ```
 

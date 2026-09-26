@@ -72,7 +72,8 @@ run_as_user() {
 #  0 = battery report found          1 = timeout / read error
 #  2 = no Legion device present      3 = present but no permission
 PROBE_TMP="$(mktemp /tmp/legion-go-probe.XXXXXX.py)"
-trap 'rm -f "$PROBE_TMP"' EXIT
+SERVICE_TMP="$(mktemp /tmp/legion-go-service.XXXXXX)"
+trap 'rm -f "$PROBE_TMP" "$SERVICE_TMP"' EXIT
 cat > "$PROBE_TMP" <<'PY'
 import os, select, sys, time
 timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 8.0
@@ -223,11 +224,11 @@ ok "extension install location writable"
 
 # 6. udev rule state --------------------------------------------------------
 if [[ -f "$RULE_FILE" ]]; then
-    if grep -qi "$VID" "$RULE_FILE" && grep -qi "$PID" "$RULE_FILE"; then
+    if grep -qi "$VID" "$RULE_FILE"; then
         ok "udev rule already present: $RULE_FILE (kept as-is)"
         RULE_EXISTS=true
     else
-        warn "a udev rule exists at $RULE_FILE but does not cover $VID:$PID — leaving it untouched"
+        warn "a udev rule exists at $RULE_FILE but does not cover $VID — leaving it untouched"
         RULE_EXISTS=true
     fi
 else
@@ -253,8 +254,9 @@ if ! $RULE_EXISTS; then
     read -r -d '' RULE <<EOF || true
 # Lenovo Legion Go detachable controller batteries (Peripheral Battery Status):
 # make the raw HID interface readable so a userspace helper can read the
-# battery report (id 0x04).
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="$VID", ATTRS{idProduct}=="$PID", OWNER="$TARGET_USER", MODE="0660", TAG+="uaccess"
+# battery report (id 0x04). Vendor-wide: the rail enumerates both the docked
+# (61eb) and detached/wireless (61ed) presentations with this vendor ID.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="$VID", OWNER="$TARGET_USER", MODE="0660", TAG+="uaccess"
 EOF
     echo -e "  creating $RULE_FILE"
     echo "$RULE" | sudo tee "$RULE_FILE" >/dev/null
@@ -286,6 +288,47 @@ else
     ok "extension files installed (uuid: $UUID)"
 fi
 
+# 8b. systemd user helper service ------------------------------------------
+# The helper runs as a systemd --user unit (not spawned by the shell, which
+# avoids Gio.Subprocess quirks and survives shell restarts). Installed even
+# if the extension files were already present.
+UNIT_NAME="peripheral-battery-legion.service"
+UNIT_DIR="$TARGET_HOME/.config/systemd/user"
+UNIT_FILE="$UNIT_DIR/$UNIT_NAME"
+cat > "$SERVICE_TMP" <<EOF
+[Unit]
+Description=Legion Go controller battery helper (Peripheral Battery Status)
+# Reads the docked controllers' raw HID report and writes
+# ~/.cache/peripheral-battery-status/legion-go.json for the extension.
+# Runs outside the graphical session so it survives shell restarts.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 "$EXTDIR/tools/legion_go_battery.py"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+if [[ -d "$UNIT_DIR" ]]; then
+    [[ -w "$UNIT_DIR" ]] || [[ $EUID -eq 0 ]] || fail "systemd user dir not writable: $UNIT_DIR"
+else
+    if [[ $EUID -eq 0 ]]; then
+        install -d -m 0755 -o "$TARGET_USER" -g "$TARGET_USER" "$UNIT_DIR"
+    else
+        mkdir -p "$UNIT_DIR"
+    fi
+fi
+install -m 0644 "$SERVICE_TMP" "$UNIT_FILE"
+if [[ $EUID -eq 0 ]]; then chown "$TARGET_USER:" "$UNIT_FILE"; fi
+if run_as_user "systemctl --user daemon-reload && systemctl --user enable --now '$UNIT_NAME'"; then
+    ok "helper service installed, enabled and started ($UNIT_NAME)"
+else
+    warn "service installed but could not be enabled (is a user session active?). "
+         "Enable it later with: systemctl --user enable --now $UNIT_NAME"
+fi
+
 # 9. post-install verify: user-level read must now work ---------------------
 probe ""
 if [[ "$PROBE_RC" -eq 0 ]]; then
@@ -296,16 +339,35 @@ else
          "sudo udevadm trigger --subsystem-match=hidraw"
 fi
 
-# 10. end-to-end smoke test: run the helper, read its state file ------------
-echo "  running helper for 4s (smoke test)…"
+# 10. end-to-end smoke test: helper service + fresh state file ---------------
+# (A manual one-shot helper run would now just lose the flock to the running
+# service, so the smoke test checks the service and its state file instead.)
 STATE_JSON="$TARGET_HOME/.cache/peripheral-battery-status/legion-go.json"
-rm -f "$STATE_JSON"
-run_as_user "timeout 5 python3 '$EXTDIR/tools/legion_go_battery.py' & HP=\$!; sleep 4; kill \$HP 2>/dev/null; wait \$HP 2>/dev/null"
-if [[ -f "$STATE_JSON" ]]; then
-    ok "helper works; state file:"
-    sed 's/^/    /' "$STATE_JSON"
+if run_as_user "systemctl --user is-active --quiet '$UNIT_NAME'"; then
+    echo "  helper service is active; waiting for a state write…"
+    for _ in 1 2 3 4 5 6; do
+        if [[ -s "$STATE_JSON" ]] && (( $(date +%s) - $(stat -c %Y "$STATE_JSON" 2>/dev/null || echo 0) < 60 )); then
+            break
+        fi
+        sleep 1
+    done
+    if [[ -s "$STATE_JSON" ]]; then
+        ok "helper service writes state; state file:"
+        sed 's/^/    /' "$STATE_JSON"
+    else
+        warn "service is active but wrote no state file yet — "
+             "check 'systemctl --user status $UNIT_NAME'"
+    fi
 else
-    warn "helper ran but wrote no state file — see ~/.cache/peripheral-battery-status/"
+    echo "  service inactive — running a one-shot helper smoke test…"
+    rm -f "$STATE_JSON"
+    run_as_user "timeout 5 python3 '$EXTDIR/tools/legion_go_battery.py' & HP=\$!; sleep 4; kill \$HP 2>/dev/null; wait \$HP 2>/dev/null"
+    if [[ -f "$STATE_JSON" ]]; then
+        ok "helper works; state file:"
+        sed 's/^/    /' "$STATE_JSON"
+    else
+        warn "helper ran but wrote no state file — see ~/.cache/peripheral-battery-status/"
+    fi
 fi
 
 # 11. enable the extension --------------------------------------------------

@@ -54,10 +54,14 @@ const UPOWER_SKIP_KINDS = new Set([0, 1, 3]); // unknown, line power, UPS
 const DEFAULT_ICON = 'battery-symbolic';
 
 /* Legion Go controller source: helper writes a state file we watch.
- * The helper (tools/legion_go_battery.py) is spawned by the extension. */
+ * The helper (tools/legion_go_battery.py) runs as the systemd user unit
+ * LEGION_SERVICE (installed by install.sh) so it survives shell restarts.
+ * Gio.Subprocess spawning is unreliable in some environments, so the
+ * extension never execs the helper itself - it only asks systemd to run it. */
 const LEGION_STATE_DIR = GLib.build_filenamev([
     GLib.get_user_cache_dir(), 'peripheral-battery-status']);
 const LEGION_STATE_FILE = GLib.build_filenamev([LEGION_STATE_DIR, 'legion-go.json']);
+const LEGION_SERVICE = 'peripheral-battery-legion.service';
 const LEGION_ICON = 'input-gaming-symbolic';
 
 const UPowerIcons = {
@@ -163,12 +167,8 @@ export default class PeripheralBatteryExtension extends Extension {
             Gio.DBus.system.signal_unsubscribe(id);
         this._subs = [];
 
-        // Stop the Legion Go controller battery helper (pipe EOF -> exit)
-        // and stop watching its state file.
-        try {
-            this._legionHelper?.force_exit();
-        } catch (e) { /* already dead */ }
-        this._legionHelper = null;
+        // Stop watching the Legion helper's state file. (The helper itself
+        // is a systemd user service and keeps running across shell restarts.)
         this._legionRespawnAfter = 0;
         try {
             this._legionMonitor?.cancel();
@@ -391,10 +391,6 @@ export default class PeripheralBatteryExtension extends Extension {
 
     /* ---------------- Legion Go controllers ---------------- */
 
-    _getLegionHelperPath() {
-        return GLib.build_filenamev([this.path, 'tools', 'legion_go_battery.py']);
-    }
-
     _ensureLegionMonitor() {
         if (this._legionMonitor)
             return;
@@ -418,27 +414,26 @@ export default class PeripheralBatteryExtension extends Extension {
     }
 
     _ensureLegionHelper() {
+        // The helper is a systemd user service; Gio.Subprocess spawning is
+        // unreliable in some environments, so we never exec it ourselves.
+        // Just ask systemd to (re)start the unit if it isn't running.
         const now = Date.now();
-        if (this._legionHelper) {
-            if (!this._legionHelper.get_if_exited())
-                return;                     // a live instance is running
-            this._legionHelper = null;      // it exited: allow a respawn
-        }
         if (now < (this._legionRespawnAfter ?? 0))
-            return;                         // brief back-off after a spawn
+            return;                         // don't spam systemd
+        this._legionRespawnAfter = now + 30000;
         try {
-            this._legionHelper = new Gio.Subprocess({
-                argv: ['python3', this._getLegionHelperPath()],
-                flags: Gio.SubprocessFlags.STDIN_PIPE,
-            });
-            // The helper single-instances itself via flock, so a fresh
-            // spawn is harmless even if a previous instance survived a
-            // shell restart; if this one loses the flock race it exits on
-            // its own and is respawned by the next refresh.
-            this._legionRespawnAfter = now + 15000;
+            const bus = Gio.DBus.session.get_sync(null);
+            bus.call('org.freedesktop.systemd1', '/org/freedesktop/systemd1',
+                'org.freedesktop.systemd1.Manager', 'StartUnit',
+                new GLib.Variant('(ss)', [LEGION_SERVICE, 'fail']),
+                new GLib.Variant('(o)', ['/']),
+                Gio.DBusCallFlags.NONE, 5000, null,
+                (b, res) => {
+                    try { b.call_finish(res); }
+                    catch (e) { /* already running or unit not installed */ }
+                });
         } catch (e) {
-            console.warn(`[${this.metadata.uuid}] Legion helper: ${e.message}`);
-            this._legionHelper = null;
+            console.warn(`[${this.metadata.uuid}] Legion helper service: ${e.message}`);
         }
     }
 
