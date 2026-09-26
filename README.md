@@ -53,14 +53,15 @@ auto-starts at login, and systemd restarts it if it ever dies. Everything else
 stays in user space: the only system change is the udev rule (see below), and
 no kernel patching or extra packages are needed (`python3` only).
 
-**What to expect with detached controllers:** the report stream keeps sending
-battery bytes while the rail is enumerated, and it marks both controllers
-"attached" even when one is physically detached — docked and detached frames
-are byte-identical. The extension therefore shows whatever the stream reports
-and hides a row only when the stream goes silent (the helper writes
-`"ok": false` after ~15 s without a report). See
-[Troubleshooting](#troubleshooting) for how to tell a live readout from a
-stale one.
+**Detached controllers:** the raw stream keeps reporting both battery levels
+at all times (the "attached" bits stay set even when a controller is taken off
+the rail), and those levels are **live radio telemetry** — a test run showed
+them draining in real time while both controllers were being used detached
+away from the console. The extension therefore shows the stream as-is. A row
+only disappears when the rail goes silent (the helper writes `"ok": false`
+after ~15 s without a report, which happens when the rail itself is
+disconnected), and a controller that powers off while still reporting shows
+0%.
 
 ## Requirements
 
@@ -138,15 +139,12 @@ start).
   state file:
   `journalctl --user -u org.gnome.Shell | grep -i legion`
   and `cat ~/.cache/peripheral-battery-status/legion-go.json`.
-- **Rows stay at 100%/99% while the controllers are detached** — the raw
-  report stream keeps sending battery bytes (with "attached" still set) while
-  the rail is enumerated, so the rows keep their last reported value until the
-  stream goes silent. Whether that detached figure is the controller's live
-  radio battery or a frozen rail value cannot be told from a single sample:
-  let them drain detached and watch
-  `cat ~/.cache/peripheral-battery-status/legion-go.json` (or
-  `python3 tools/legion_go_capture.py`) — a drifting level is live, a pinned
-  one is stale. The row only hides once the stream stops (`"ok": false`).
+- **A controller's level doesn't move** — the reported levels are live radio
+  telemetry even while detached (verified by an hour-long drain test), but
+  they only change as the battery actually drains; a fully-charged detach
+  reads 99% for a long time. A row disappears when the rail stops streaming
+  (state file shows `"ok": false`), and 0% means a controller powered off
+  while still reporting.
 - **Controllers report 100% immediately after re-docking** after a draining
   session — capture what the interface actually sends during a
   detach/re-dock cycle to check whether the level is stale or genuine:
