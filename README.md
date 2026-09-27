@@ -18,8 +18,8 @@ detachable left/right controllers.
   hides itself completely when no peripheral reports battery info.
 - **Low-battery notification** when a connected device drops to ≤ 15 %;
   it re-arms once the device charges back above that threshold.
-- **Lenovo Legion Go** detachable controllers: both batteries shown while
-  docked; rows disappear when they are undocked.
+- **Lenovo Legion Go** detachable controllers: both batteries shown whenever
+  the dock is streaming, including while a controller is out of its rail.
 - CPU friendly: **purely signal-driven** — no polling. Updates are triggered
   by BlueZ/UPower D-Bus signals (coalesced with a 250 ms debounce), and the
   UI is only rebuilt when the set of devices actually changes.
@@ -30,19 +30,20 @@ detachable left/right controllers.
 |-------------------|------------------------------------------------------------|
 | BlueZ (`org.bluez`)  | Bluetooth devices exposing `Battery1.Percentage`, `Device1.BatteryLevel` or `Device1.BatteryPercentage` (bluez ≥ 5.56/5.64) |
 | UPower (`org.freedesktop.UPower`) | USB/HID++/dongle devices, e.g. Logitech mice & keyboards (`UPower.Device`) |
-| Legion Go controllers | Docked detachable controllers (`17ef:61eb`/`61ed`), read via hidraw — see below |
+| Legion Go controllers | Detachable controllers (`17ef:61eb`/`61ed`) read via the dock's hidraw interface — see below |
 
 Devices are de-duplicated by name; BlueZ wins for Bluetooth devices.
 The laptop's own battery and line power are excluded.
 
 ### Legion Go controllers
 
-The Legion Go's detachable controllers have their own batteries. Docked, they
-enumerate as USB devices (`17ef:61eb`/`61ed` "Legion Controller"); the raw HID
-interface streams a status report (id `0x04`) containing both controllers'
-battery level, and the stock `hid-lenovo-go` kernel driver passes it through
-to hidraw. A **udev rule** (vendor-wide `17ef`) makes the hidraw nodes
-readable by your user.
+The Legion Go's detachable controllers have their own batteries. They talk to
+the tablet over the dock's radios, and the tablet's own rail enumerates as USB
+(`17ef:61eb`/`61ed` "Legion Controller"); the raw HID interface streams a status
+report containing both controllers' battery level whether or not they are
+docked, and the stock `hid-lenovo-go` kernel driver passes it through to
+hidraw. A **udev rule** (vendor-wide `17ef`) makes the hidraw nodes readable by
+your user.
 
 `tools/legion_go_battery.py` runs as the per-user systemd service
 `peripheral-battery-legion.service` (created and enabled by `install.sh`). It
@@ -54,14 +55,21 @@ stays in user space: the only system change is the udev rule (see below), and
 no kernel patching or extra packages are needed (`python3` only).
 
 **Detached controllers:** the raw stream keeps reporting both battery levels
-at all times (the "attached" bits stay set even when a controller is taken off
-the rail), and those levels are **live radio telemetry** — a test run showed
-them draining in real time while both controllers were being used detached
-away from the console. The extension therefore shows the stream as-is. A row
-only disappears when the rail goes silent (the helper writes `"ok": false`
-after ~15 s without a report, which happens when the rail itself is
-disconnected), and a controller that powers off while still reporting shows
-0%.
+at all times, and those levels are **live radio telemetry** — measured at 99%
+for a controller left switched on and sitting on the desk, well after it was
+undocked, and previously verified over an hour-long drain while both
+controllers were used detached away from the console. The extension therefore
+shows the stream as-is, and a detached row reads *"Not connected"* next to a
+level that is still real.
+
+The dock's own docked/undocked bit (the low bit of bytes 12 and 13) travels
+alongside the levels rather than gating them. The rail going quiet is what
+clears a row: the helper writes `"ok": false` after ~15 s without a report,
+which is what happens when the dock itself goes away. Undocking does *not*
+clear anything — it re-enumerates the dock's HID devices for about a second
+(the node is renumbered, and the brief gap before udev has finished with the
+new one can even make the open fail), and the last state is kept across it.
+A controller that powers off while still reporting shows 0%.
 
 ## Requirements
 
@@ -69,9 +77,9 @@ disconnected), and a controller that powers off while still reporting shows
 - `python3`
 - A kernel with the mainline `hid-lenovo-go` driver (present on Fedora,
   Bazzite, Arch, and most current distributions)
-- For the Legion Go rows: the controllers must be docked, and the daemon that
-  manages them (hhd, or **inputplumber** on Bazzite/SteamOS) must be running
-  so the status report streams.
+- For the Legion Go rows: hhd, or **inputplumber** on Bazzite/SteamOS, must be
+  running so the status report streams. A controller does not have to be in its
+  rail — the levels keep coming either way.
 
 Immutable systems (Bazzite, Fedora Atomic, SteamOS) are supported: the
 installer only writes to `~/.local` and `/etc/udev/rules.d` — both mutable and
@@ -140,15 +148,16 @@ start).
   `journalctl --user -u org.gnome.Shell | grep -i legion`
   and `cat ~/.cache/peripheral-battery-status/legion-go.json`.
 - **A controller's level doesn't move** — the reported levels are live radio
-  telemetry even while detached (verified by an hour-long drain test), but
-  they only change as the battery actually drains; a fully-charged detach
-  reads 99% for a long time. A row disappears when the rail stops streaming
-  (state file shows `"ok": false`), and 0% means a controller powered off
-  while still reporting.
-- **Controllers report 100% immediately after re-docking** after a draining
-  session — capture what the interface actually sends during a
-  detach/re-dock cycle to check whether the level is stale or genuine:
-  `python3 tools/legion_go_capture.py` (see `tools/legion_go_capture.py`).
+  telemetry even while detached, but they only change as the battery actually
+  drains; a fully-charged detach reads 99% for a long time. A row disappears
+  when the rail stops streaming (state file shows `"ok": false`, after ~15 s
+  without a report), and 0% means a controller powered off while still
+  reporting.
+- **The level jumps to a wrong value for a second after a re-dock** — the
+  frames that come out of the re-enumeration can carry junk in the battery
+  positions (1% and 129% were both seen). The helper drops those frames; if
+  one ever gets through, `python3 tools/legion_go_capture.py` logs what the
+  interface actually sent, and reports how many non-status frames it skipped.
 - **The installer's stream check fails** — the controllers must be docked and
   hhd/inputplumber must be running; run `./install.sh --check` again after
   they are.
@@ -167,7 +176,7 @@ install.sh      one-shot installer: compatibility check, then install
 Makefile        make install/uninstall convenience (same templating as the script)
 tools/probe.js  standalone probe to dump what BlueZ/UPower report
 tools/legion_go_battery.py  Legion Go controller battery helper (systemd user service)
-tools/legion_go_capture.py  diagnostic: log raw 0x04/0x74 reports during a detach/re-dock cycle
+tools/legion_go_capture.py  diagnostic: log status reports across a detach/re-dock cycle
 ```
 
 ## License

@@ -76,25 +76,13 @@ SERVICE_TMP="$(mktemp /tmp/legion-go-service.XXXXXX)"
 trap 'rm -f "$PROBE_TMP" "$SERVICE_TMP"' EXIT
 cat > "$PROBE_TMP" <<'PY'
 import os, select, sys, time
+sys.path.insert(0, sys.argv[2])          # the repo's tools/ dir
+from legion_go_battery import (           # one decode, not a fourth copy
+    discover_raw_hidraw, is_status_report, parse_report,
+)
+
 timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 8.0
-node = None
-try:
-    nodes = os.listdir('/sys/class/hidraw')
-except OSError:
-    print('NO_DEVICE'); sys.exit(2)
-for n in nodes:
-    dev = os.path.realpath(f'/sys/class/hidraw/{n}/device')
-    hid = os.path.basename(dev)
-    if not hid.startswith('0003:17EF:'):
-        continue
-    try:
-        with open(f'/sys/bus/hid/devices/{hid}/uevent') as f:
-            ue = dict(l.split('=', 1) for l in f.read().splitlines() if '=' in l)
-    except OSError:
-        continue
-    if 'legion' in ue.get('HID_NAME', '').lower() and ue.get('HID_PHYS', '').endswith('/input2'):
-        node = f'/dev/{n}'
-        break
+node = discover_raw_hidraw()
 if not node:
     print('NO_DEVICE'); sys.exit(2)
 try:
@@ -104,17 +92,25 @@ except PermissionError:
 except OSError as e:
     print('OPEN_ERR', node, e); sys.exit(1)
 deadline = time.time() + timeout
+buf = bytearray()
 while time.time() < deadline:
     r, _, _ = select.select([fd], [], [], 1.0)
     if not r:
         continue
     try:
-        buf = os.read(fd, 64)
+        chunk = os.read(fd, 64 - len(buf) if len(buf) < 64 else 64)
     except OSError as e:
         print('READ_ERR', node, e); sys.exit(1)
-    if len(buf) >= 64 and buf[0] in (0x04, 0x74):
-        print(f'OK {node} id=0x{buf[0]:02x} left={buf[5]} right={buf[7]} '
-              f'attachedL={1 - ((buf[12] >> 7) & 1)} attachedR={1 - ((buf[13] >> 7) & 1)}')
+    if not chunk:
+        print('EOF', node); sys.exit(1)
+    buf += chunk
+    while len(buf) >= 64:
+        frame, buf = bytes(buf[:64]), buf[64:]
+        if not is_status_report(frame):
+            continue                     # button traffic, not a reading
+        v = parse_report(frame)
+        print(f"OK {node} left={v['left']} right={v['right']} "
+              f"attachedL={v['attL']} attachedR={v['attR']}")
         sys.exit(0)
 print('TIMEOUT', node); sys.exit(1)
 PY
@@ -152,9 +148,9 @@ ok "install sources present"
 probe() { # $1 = interpreter prefix ("" or "sudo")
     local out rc
     if [[ -n "$1" ]]; then
-        out="$($1 python3 "$PROBE_TMP" "$PROBE_TIMEOUT" 2>&1)" && rc=0 || rc=$?
+        out="$($1 python3 "$PROBE_TMP" "$PROBE_TIMEOUT" "$SCRIPT_DIR/tools" 2>&1)" && rc=0 || rc=$?
     else
-        out="$(python3 "$PROBE_TMP" "$PROBE_TIMEOUT" 2>&1)" && rc=0 || rc=$?
+        out="$(python3 "$PROBE_TMP" "$PROBE_TIMEOUT" "$SCRIPT_DIR/tools" 2>&1)" && rc=0 || rc=$?
     fi
     PROBE_OUT="$out"; PROBE_RC="$rc"
 }
@@ -173,7 +169,7 @@ case "$PROBE_RC" in
                 ok "battery report confirmed (read via sudo): $PROBE_OUT"
                 ;;
             2)
-                fail "Legion Go raw interface not found — are the controllers docked?"
+                fail "Legion Go dock interface not found (no hidraw node for 17ef:61eb/61ed)"
                 ;;
             1)
                 case "$PROBE_OUT" in
@@ -191,7 +187,7 @@ case "$PROBE_RC" in
         esac
         ;;
     2)
-        fail "Legion Go raw interface not found — are the controllers docked?"
+        fail "Legion Go dock interface not found (no hidraw node for 17ef:61eb/61ed)"
         ;;
     1)
         case "$PROBE_OUT" in
@@ -298,7 +294,7 @@ UNIT_FILE="$UNIT_DIR/$UNIT_NAME"
 cat > "$SERVICE_TMP" <<EOF
 [Unit]
 Description=Legion Go controller battery helper (Peripheral Battery Status)
-# Reads the docked controllers' raw HID report and writes
+# Reads the dock's raw HID report and writes
 # ~/.cache/peripheral-battery-status/legion-go.json for the extension.
 # Runs outside the graphical session so it survives shell restarts.
 
@@ -383,7 +379,7 @@ fi
 # ---------------------------------------------------------------------------
 phase "done"
 echo -e "  ${C_BOLD}Log out and back in${C_RESET} so GNOME Shell loads the extension."
-echo "  It should then show \"Legion Go Left / Right\" when the controllers are docked."
+echo "  It should then show \"Legion Go Left / Right\"."
 echo
 echo "  Uninstall:   make uninstall          (removes the extension, not the udev rule)"
 echo "  Rule file:   $RULE_FILE  (remove it with sudo to revert access)"
