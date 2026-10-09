@@ -2,8 +2,9 @@
 # =============================================================================
 # install.sh — Peripheral Battery Status installer with pre-flight check
 #
-# 1. Runs READ-ONLY compatibility tests (GNOME 50, python3, Legion Go raw
-#    interface present, the 0x04 battery report actually streams).
+# 1. Runs READ-ONLY compatibility tests (the GNOME Shell version declared in
+#    metadata.json, python3, Legion Go raw interface present, the 0x04
+#    battery report actually streams).
 # 2. Only if ALL tests pass: installs the extension (if not already) and
 #    creates the udev rule granting hidraw access.
 #
@@ -127,16 +128,17 @@ echo -e "  extension   : $EXTDIR"
 command -v python3 >/dev/null || fail "python3 not found — cannot run the helper."
 ok "python3 found ($(python3 --version 2>&1))"
 
-# 2. GNOME Shell >= 50 ------------------------------------------------------
+# 2. GNOME Shell version declared by metadata.json --------------------------
 gsv="$(gnome-shell --version 2>/dev/null || true)"
 major="$(sed -n 's/.*GNOME Shell \([0-9][0-9]*\).*/\1/p' <<<"$gsv")"
 if [[ -z "$major" ]]; then
     fail "could not determine GNOME Shell version ('gnome-shell --version' -> '$gsv')."
 fi
-if (( major < 50 )); then
-    fail "GNOME Shell $major detected, but this extension requires GNOME Shell 50."
+supported="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["shell-version"]))' "$SCRIPT_DIR/metadata.json")"
+if ! grep -qw -- "$major" <<<"$supported"; then
+    fail "GNOME Shell $major detected, but metadata.json declares shell-version: $supported."
 fi
-ok "shell version: $gsv (>= 50 required)"
+ok "shell version: $gsv (declared: $supported)"
 
 # 3. install sources present ------------------------------------------------
 for f in extension.js metadata.json tools/legion_go_battery.py; do
