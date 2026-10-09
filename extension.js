@@ -149,6 +149,7 @@ export default class PeripheralBatteryExtension extends Extension {
         this._alerted = new Map();       // key -> true while low-battery alert active
         this._refreshIdle = 0;
         this._subs = [];
+        this._legionSig = null;          // last Legion state we acted on
 
         this._buildQuickSettings();
 
@@ -405,7 +406,18 @@ export default class PeripheralBatteryExtension extends Extension {
             this._legionMonitor = dir.monitor_directory(
                 Gio.FileMonitorFlags.WATCH_MOVES, null);
             this._legionMonitor.connect('changed', (mon, file, other, event) => {
-                if (file.get_basename() === 'legion-go.json')
+                // The helper writes atomically (tmp file + rename), and with
+                // WATCH_MOVES a rename arrives as RENAMED: file=old name,
+                // other=new name. Only checking `file` therefore missed every
+                // state update; accept the destination from either slot.
+                const target = file?.get_basename() === 'legion-go.json'
+                    ? file
+                    : other?.get_basename() === 'legion-go.json' ? other : null;
+                if (!target)
+                    return;
+                // The helper rewrites the file for every report (~40/s), so
+                // refresh only when the values we display actually changed.
+                if (this._legionStateChanged(target))
                     this._scheduleRefresh();
             });
         } catch (e) {
@@ -422,11 +434,11 @@ export default class PeripheralBatteryExtension extends Extension {
             return;                         // don't spam systemd
         this._legionRespawnAfter = now + 30000;
         try {
-            const bus = Gio.DBus.session.get_sync(null);
+            const bus = Gio.bus_get_sync(Gio.BusType.SESSION, null);
             bus.call('org.freedesktop.systemd1', '/org/freedesktop/systemd1',
                 'org.freedesktop.systemd1.Manager', 'StartUnit',
                 new GLib.Variant('(ss)', [LEGION_SERVICE, 'fail']),
-                new GLib.Variant('(o)', ['/']),
+                new GLib.VariantType('(o)'),
                 Gio.DBusCallFlags.NONE, 5000, null,
                 (b, res) => {
                     try { b.call_finish(res); }
@@ -435,6 +447,22 @@ export default class PeripheralBatteryExtension extends Extension {
         } catch (e) {
             console.warn(`[${this.metadata.uuid}] Legion helper service: ${e.message}`);
         }
+    }
+
+    _legionStateChanged(file) {
+        let state;
+        try {
+            const [, contents] = file.load_contents(null);
+            state = JSON.parse(new TextDecoder().decode(contents));
+        } catch (e) {
+            return false;               // transient read error: not a change
+        }
+        const sig = `${state.ok}|${state.left?.pct}|${state.left?.attached}`
+            + `|${state.right?.pct}|${state.right?.attached}`;
+        if (sig === this._legionSig)
+            return false;
+        this._legionSig = sig;
+        return true;
     }
 
     _collectLegionDevices(devices) {

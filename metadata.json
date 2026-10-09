@@ -2,8 +2,8 @@
   "name": "Peripheral Battery Status",
   "description": "Shows the battery level of Bluetooth and USB peripherals (mice, keyboards, gamepads, headsets, ...) plus the Lenovo Legion Go docked controllers in Quick Settings, like KDE Plasma's battery applet. The toggle shows the lowest battery of your connected devices; opening it lists every device with a battery bar and low-battery notifications.",
   "uuid": "peripheral-battery-status@your_username",
-  "shell-version": ["50"],
-  "version": 1,
+  "shell-version": ["51"],
+  "version": 2,
   "gettext-domain": null,
   "url": "https://github.com/Mujtaba-Alsaleh/gnome-shell-extension-peripheral-battery"
 }
