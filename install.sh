@@ -264,9 +264,22 @@ else
 fi
 
 # 8. extension files --------------------------------------------------------
-if [[ -f "$EXTDIR/extension.js" ]] && ! $FORCE_EXT; then
-    ok "extension already installed (use --force to refresh)"
+# Compare what is installed with the sources first: silently keeping a stale
+# copy is what leaves the extension disabled after a GNOME upgrade (the old
+# metadata.json keeps declaring an older shell-version), so refresh on any
+# drift in the load-bearing files instead of skipping everything.
+STALE=false
+if [[ -f "$EXTDIR/extension.js" ]]; then
+    cmp -s "$SCRIPT_DIR/extension.js" "$EXTDIR/extension.js" || STALE=true
+    cmp -s <(sed "s/@your_username/@${TARGET_USER}/g" "$SCRIPT_DIR/metadata.json") \
+           "$EXTDIR/metadata.json" || STALE=true
+fi
+if [[ -f "$EXTDIR/extension.js" ]] && ! $FORCE_EXT && ! $STALE; then
+    ok "extension already installed and up to date (use --force to refresh)"
 else
+    if [[ -f "$EXTDIR/extension.js" ]] && ! $FORCE_EXT; then
+        warn "installed copy differs from the repository — refreshing it"
+    fi
     echo "  copying files into $EXTDIR (metadata templated for user '$TARGET_USER')"
     if [[ $EUID -eq 0 ]]; then
         install -d -m 0755 "$EXTDIR/tools"
