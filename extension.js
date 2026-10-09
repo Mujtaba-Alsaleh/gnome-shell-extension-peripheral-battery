@@ -14,8 +14,8 @@
  * CPU friendly: completely signal-driven (no polling); UI is only
  * rebuilt when the set of devices actually changes.
  *
- * Built for GNOME Shell 50 (ESM extension format); uses the GNOME 50
- * Quick Settings external-indicator API (Main.panel.statusArea.quickSettings).
+ * Built for GNOME Shell 51 (ESM extension format); uses the Quick Settings
+ * external-indicator API (Main.panel.statusArea.quickSettings).
  */
 
 import Clutter from 'gi://Clutter';
@@ -207,7 +207,7 @@ export default class PeripheralBatteryExtension extends Extension {
 
         this._indicator.quickSettingsItems.push(this._toggle);
 
-        // GNOME 50: external indicators are attached through the Quick
+        // Since GNOME 50: external indicators are attached through the Quick
         // Settings menu's own API (Main.panel itself has no such method).
         const quickSettings = Main.panel.statusArea.quickSettings;
         if (!quickSettings?.addExternalIndicator) {

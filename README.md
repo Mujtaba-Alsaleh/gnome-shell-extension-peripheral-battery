@@ -1,6 +1,6 @@
 # Peripheral Battery Status
 
-A GNOME Shell extension for **GNOME 50** that shows the battery level of your
+A GNOME Shell extension for **GNOME 51** that shows the battery level of your
 Bluetooth and USB peripherals — mice, keyboards, gamepads, headsets, etc. — in
 the **Quick Settings** area of the system menu, similar to the KDE Plasma
 battery applet. It also shows the batteries of the **Lenovo Legion Go**'s
@@ -64,16 +64,18 @@ level that is still real.
 
 The dock's own docked/undocked bit (the low bit of bytes 12 and 13) travels
 alongside the levels rather than gating them. The rail going quiet is what
-clears a row: the helper writes `"ok": false` after ~15 s without a report,
-which is what happens when the dock itself goes away. Undocking does *not*
-clear anything — it re-enumerates the dock's HID devices for about a second
-(the node is renumbered, and the brief gap before udev has finished with the
-new one can even make the open fail), and the last state is kept across it.
-A controller that powers off while still reporting shows 0%.
+clears a row: after ~15 s without a report the helper rewrites the payload
+with `"pct": null` for both sides, keeping `"ok": true` and the previous
+`last_seen`; `"ok": false` with `"last_seen": 0` instead means the interface
+could not be found or opened at all. Undocking does *not* clear anything — it
+re-enumerates the dock's HID devices for about a second (the node is
+renumbered, and the brief gap before udev has finished with the new one can
+even make the open fail), and the last state is kept across it. A controller
+that powers off while still reporting shows 0%.
 
 ## Requirements
 
-- **GNOME Shell 50** (e.g. stock GNOME on Fedora 43+, Bazzite GNOME)
+- **GNOME Shell 51** (the version `metadata.json` declares)
 - `python3`
 - A kernel with the mainline `hid-lenovo-go` driver (present on Fedora,
   Bazzite, Arch, and most current distributions)
@@ -117,12 +119,12 @@ preserved across OS updates. Nothing is layered with rpm-ostree.
 git clone https://github.com/Mujtaba-Alsaleh/gnome-shell-extension-peripheral-battery.git && cd gnome-shell-extension-peripheral-battery && chmod +x install.sh && ./install.sh
 ```
 
-The installer first runs **read-only compatibility checks** (GNOME 50,
-python3, the Legion Go interface present and its battery report actually
-streaming) and only installs anything if every check passes. It detects your
-username automatically for both the extension UUID
-(`peripheral-battery-status@<your user>`) and the udev rule owner. It may ask
-for your **sudo password once when creating the udev rule** — that is
+The installer first runs **read-only compatibility checks** (the GNOME Shell
+version `metadata.json` declares, python3, the Legion Go interface present and
+its battery report actually streaming) and only installs anything if every
+check passes. It detects your username automatically for both the extension
+UUID (`peripheral-battery-status@<your user>`) and the udev rule owner. It may
+ask for your **sudo password once when creating the udev rule** — that is
 expected. `./install.sh --check` runs only the tests and changes nothing.
 
 > The installer is the one supported path. For a manual install you would
@@ -150,7 +152,7 @@ start).
 - **A controller's level doesn't move** — the reported levels are live radio
   telemetry even while detached, but they only change as the battery actually
   drains; a fully-charged detach reads 99% for a long time. A row disappears
-  when the rail stops streaming (state file shows `"ok": false`, after ~15 s
+  when the rail stops streaming (state file shows `"pct": null`, after ~15 s
   without a report), and 0% means a controller powered off while still
   reporting.
 - **The level jumps to a wrong value for a second after a re-dock** — the
@@ -171,7 +173,7 @@ start).
 
 ```
 metadata.json   extension metadata
-extension.js    the extension (ESM, GNOME 50)
+extension.js    the extension (ESM, GNOME 51)
 install.sh      one-shot installer: compatibility check, then install
 Makefile        make install/uninstall convenience (same templating as the script)
 tools/probe.js  standalone probe to dump what BlueZ/UPower report
